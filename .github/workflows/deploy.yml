@@ -73,7 +73,11 @@ jobs:
           fi
           echo "Bundle is self-contained."
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Publish bundle for GitHub Pages
+        # Only the default branch has somewhere to deploy to; skip the
+        # artifact on pull requests so contributor CI stays cheap.
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: app/dist
 
