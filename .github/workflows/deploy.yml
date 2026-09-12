@@ -28,18 +28,38 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Print environment (helps diagnose runner-only failures)
+        run: |
+          echo "node $(node -v) · npm $(npm -v) · $(uname -sr)"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "node $(node -v) · npm $(npm -v) · $(uname -sr)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Unit + resilience tests
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/radius-tests.log
+        continue-on-error: false
+
+      - name: Surface test output when tests fail
+        if: failure()
+        run: |
+          {
+            echo "### Vitest output (failure)"
+            echo '```'
+            grep -vE "^\s*$" /tmp/radius-tests.log 2>/dev/null | tail -n 90 || echo "no log captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build static bundle
         run: npm run build
