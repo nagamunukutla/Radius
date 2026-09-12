@@ -2,11 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DepartureChart from "./components/DepartureChart";
 import FactorList from "./components/FactorList";
 import MapView from "./components/MapView";
+import ModePicker from "./components/ModePicker";
+import ModeTable from "./components/ModeTable";
 import PlaceInput from "./components/PlaceInput";
+import TransitPanel from "./components/TransitPanel";
 import ProductivityPanel from "./components/ProductivityPanel";
 import ScoreGauge from "./components/ScoreGauge";
 import SettingsPanel from "./components/SettingsPanel";
 import { evaluateCommute, emergencyEstimate } from "./lib/evaluate";
+import type { CommuteMode } from "./lib/departure";
+import { riskBudget } from "./lib/departure";
 import {
   loadRecent,
   loadSaved,
@@ -18,7 +23,7 @@ import {
   type SavedCommute,
 } from "./lib/storage";
 import { DEFAULT_SETTINGS, type CommuteEvaluation, type Place, type UserSettings } from "./lib/types";
-import { humanDuration, money, round } from "./lib/util";
+import { humanDuration, minutesToClock, money, round } from "./lib/util";
 
 const START_FROM: Place = { name: "Ontinyent, València, Spain", short: "Ontinyent", lat: 38.8217, lon: -0.6059 };
 const START_TO: Place = { name: "València, Spain", short: "València", lat: 39.4699, lon: -0.3763 };
@@ -143,17 +148,19 @@ export default function App() {
 
   const headline = useMemo(() => {
     if (!e) return "";
-    if (e.recommended && e.savings && e.savings.minutes > 1) {
-      return `Leave at ${e.recommended.clock} instead — ${e.savings.minutes} min less driving and ${Math.max(0, e.cdi.score - e.recommended.cdi)} points off your drag.`;
+    const r = e.recommended;
+    if (!r) return "Nothing scoreable yet — set home and work and Radius will price the corridor.";
+    if (r.lateMinutes > 0.5) {
+      return `Even the best minute lands ${Math.round(r.lateMinutes)} min past your ${clockOf(settings.workStartMinutes)} start. The corridor is the problem, not your alarm clock.`;
     }
-    if (e.recommended && e.recommended.minutesFromNow < 12) {
-      return "Now is already the cheap minute. Go — the curve only gets worse from here.";
+    if (e.savings && e.savings.minutes > 1) {
+      return `Leave at ${r.clock}, not now. ${e.savings.minutes} fewer minutes in transit and ${Math.max(0, e.cdi.score - r.cdi)} points off your drag — still ${Math.round(r.earlyMinutes) || "0"} min before you start.`;
     }
-    if (e.cdi.score >= 60) {
-      return "This commute is taxing your week. The lever that works is the minute you leave, not the road you take.";
-    }
-    return "Your corridor is behaving. Hold the slot that produced this score.";
-  }, [e]);
+    if (r.minutesFromNow < 12) return "Now is the cheap minute. Go — every later slot on this curve is worse.";
+    if (r.earlyMinutes <= settings.maxEarlyArrivalMinutes + 2)
+      return `You do not need to leave before ${r.clock}. That minute lands you at ${arrivalLabel(r.arrivalClockMinutes)} with ${Math.round(r.onTimeRisk * 100)}% risk of being late.`;
+    return e.cdi.band.blurb;
+  }, [e, settings]);
 
   return (
     <div className="app">
@@ -219,6 +226,13 @@ export default function App() {
             Save trip
           </button>
         </div>
+        <div style={{ marginTop: 14 }}>
+          <ModePicker
+            value={settings.commuteMode}
+            onChange={(m: CommuteMode) => persistSettings({ commuteMode: m })}
+            comparison={e?.comparison ?? []}
+          />
+        </div>
         {e && (
           <div className="stats" style={{ marginTop: 14 }}>
             <div className="stat">
@@ -239,7 +253,7 @@ export default function App() {
             </div>
             <div className="stat">
               <b>{e.weather.frictionPoints}</b>
-              <span>weather friction · {e.weather.label}</span>
+              <span>weather · {e.weather.label}{e.primaryMode !== "drive" ? " (hurts you more on this mode)" : ""}</span>
             </div>
             {e.modes.bikeSeconds ? (
               <div className="stat good">
@@ -277,21 +291,41 @@ export default function App() {
                   </p>
                   {e.recommended && (
                     <div className="nudge">
-                      {e.savings && e.savings.minutes > 1 ? (
-                        <>
-                          Leave at <strong>{e.recommended.clock}</strong> · arrive{" "}
-                          <strong>{arrivalLabel(e.recommended.minutesFromNow + e.recommended.travelSeconds / 60)}</strong> ·{" "}
-                          {humanDuration(e.recommended.travelSeconds / 60)} in the car (CDI {e.recommended.cdi}).
-                          Waiting <strong>{Math.max(1, Math.round(e.recommended.minutesFromNow))} min</strong> saves{" "}
-                          <strong>{e.savings.minutes} min</strong>.
-                        </>
-                      ) : (
-                        <>
-                          Leaving now is optimal: <strong>{humanDuration(e.predictedMinutes)}</strong>, arrive{" "}
-                          <strong>{arrivalLabel(departOffset + e.predictedMinutes)}</strong>. Next best slot{" "}
-                          {e.recommended.clock} is within a minute of this.
-                        </>
-                      )}
+                      <div className="nudge-main">
+                        {e.savings && e.savings.minutes > 1 ? (
+                          <>
+                            Wait <strong>{Math.max(1, Math.round(e.recommended.minutesFromNow))} min</strong> — leave
+                            at <strong>{e.recommended.clock}</strong>, arrive{" "}
+                            <strong>{arrivalLabel(e.recommended.arrivalClockMinutes)}</strong>, and give up{" "}
+                            <strong>{e.savings.minutes} min</strong> less of your day ({humanDuration(e.recommended.travelSeconds / 60)}{" "}
+                            {MODE_NOUN[e.primaryMode]}, CDI {e.recommended.cdi}).
+                          </>
+                        ) : (
+                          <>
+                            Leave now: <strong>{humanDuration(e.predictedMinutes)}</strong>, arrive{" "}
+                            <strong>{arrivalLabel(e.recommended.arrivalClockMinutes)}</strong>. The curve says waiting
+                            buys you nothing on this corridor today.
+                          </>
+                        )}
+                      </div>
+                      <div className="nudge-sub">
+                        <span>
+                          Hard deadline{" "}
+                          <strong>{e.latestSafeClock ?? "none"}</strong> — after that, being late is more likely than
+                          not (budget: {Math.round(riskBudget(settings) * 100)}%).
+                        </span>
+                        <span>
+                          Never before <strong>{clockOf(settings.earliestDepartureMinutes)}</strong>, because you set
+                          that; the planner searched {e.departureWindow ? `${clockOf(e.departureWindow.start)}–${clockOf(e.departureWindow.end)}` : "your window"}.
+                        </span>
+                        {e.transit.available && (
+                          <span>
+                            {e.transit.modeLabel} door-to-door {humanDuration(e.transit.totalMinutes)} including{" "}
+                            {Math.round(e.transit.walkMinutes)} min walking and {Math.round(e.transit.waitMinutes)} min
+                            waiting.
+                          </span>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -324,18 +358,40 @@ export default function App() {
           {e && (
             <section className="card">
               <header>
+                <h2>How it looks without a car</h2>
+                <span className="hint">same index, different physics</span>
+              </header>
+              <TransitPanel plan={e.transit} comparison={e.comparison} />
+              <div style={{ marginTop: e.transit ? 16 : 0 }}>
+                <ModeTable e={e} onPick={(m) => persistSettings({ commuteMode: m })} />
+              </div>
+            </section>
+          )}
+
+          {e && (
+            <section className="card">
+              <header>
                 <h2>Departure curve</h2>
                 <span className="hint">every 6 min around your {clockOf(settings.workStartMinutes)} start</span>
               </header>
-              <DepartureChart options={e.departureOptions} recommended={e.recommended} />
+              <DepartureChart
+                options={e.departureOptions}
+                recommended={e.recommended}
+                leaveNow={e.leaveNow}
+                latestSafeClock={e.latestSafeClock}
+                earliestSaneClock={e.earliestSaneClock}
+                workStartMinutes={settings.workStartMinutes}
+                riskBudget={riskBudget(settings)}
+              />
               {e.departureOptions.length > 0 && (
                 <table className="slots">
                   <thead>
                     <tr>
                       <th>Leave</th>
                       <th>Arrive</th>
-                      <th>Drive</th>
+                      <th>Door to door</th>
                       <th>Buffer</th>
+                      <th>Late risk</th>
                       <th>CDI</th>
                       <th />
                     </tr>
@@ -344,10 +400,17 @@ export default function App() {
                     {rankedSlots(e).map((o) => (
                       <tr key={o.clock} className={e.recommended?.clock === o.clock ? "best" : undefined}>
                         <td>{o.clock}</td>
-                        <td>{arrivalLabel(o.minutesFromNow + o.travelSeconds / 60)}</td>
+                        <td>
+                          {arrivalLabel(o.arrivalClockMinutes)}
+                          {o.earlyMinutes > settings.maxEarlyArrivalMinutes + 1 ? (
+                            <span className="sub"> · {Math.round(o.earlyMinutes)} min idle</span>
+                          ) : null}
+                        </td>
                         <td>{round(o.travelSeconds / 60, 0)} min</td>
                         <td>+{round(o.bufferMinutes, 0)} min</td>
-                        <td>{o.cdi}</td>
+                        <td style={{ color: o.onTimeRisk > riskBudget(settings) ? "var(--danger)" : undefined }}>
+                          {Math.round(o.onTimeRisk * 100)}%
+                        </td>
                         <td style={{ textAlign: "right" }}>
                           {e.recommended?.clock === o.clock ? (
                             <span className="chip best">recommended</span>
@@ -399,6 +462,16 @@ export default function App() {
               <dd>{e?.weather.source === "open-meteo" ? "Open-Meteo (live)" : e ? "unavailable → 0" : "—"}</dd>
               <dt>Traffic source</dt>
               <dd>{settings.trafficProvider === "tomtom" ? (settings.tomtomKey ? "TomTom live" : "TomTom key missing") : "demand model"}</dd>
+              <dt>Scored for</dt>
+              <dd>{MODE_LABEL[e?.primaryMode ?? "drive"]}</dd>
+              <dt>Transit stops found</dt>
+              <dd>
+                {e?.transit
+                  ? `${e.transit.stationsFound.origin} / ${e.transit.stationsFound.destination}`
+                  : e
+                    ? "none paired"
+                    : "—"}
+              </dd>
               <dt>Distance</dt>
               <dd>{e ? `${round(e.distanceKm, 1)} km` : "—"}</dd>
               <dt>Slow stretches</dt>
@@ -467,10 +540,25 @@ export default function App() {
   );
 }
 
-function arrivalLabel(minutesFromNow: number): string {
-  const d = new Date(Date.now() + Math.max(0, minutesFromNow) * 60000);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+const MODE_LABEL: Record<CommuteMode, string> = {
+  drive: "Car",
+  transit: "Public transport",
+  bike: "Bike",
+  walk: "Walk",
+};
+
+const MODE_NOUN: Record<CommuteMode, string> = {
+  drive: "driving",
+  transit: "riding",
+  bike: "cycling",
+  walk: "walking",
+};
+
+/** Arrival is a clock, not a delta — passing minutes-from-now was the old bug. */
+function arrivalLabel(clockMinutes: number): string {
+  return minutesToClock(clockMinutes);
 }
+
 
 function clockOf(minutes: number): string {
   const m = ((Math.round(minutes) % 1440) + 1440) % 1440;

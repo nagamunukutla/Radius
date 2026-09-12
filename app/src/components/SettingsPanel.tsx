@@ -1,3 +1,4 @@
+import { PLAN_STYLES } from "../lib/departure";
 import type { UserSettings } from "../lib/types";
 import { minutesToClock } from "../lib/util";
 
@@ -12,6 +13,74 @@ const CURRENCIES = ["EUR", "USD", "GBP", "INR"];
 export default function SettingsPanel({ settings, onChange }: Props) {
   return (
     <div>
+      <div className="setting wide">
+        <label htmlFor="s-style">When should I tell you to leave?</label>
+        <select
+          id="s-style"
+          value={settings.planStyle}
+          onChange={(e) => onChange({ planStyle: e.target.value as UserSettings["planStyle"] })}
+        >
+          {PLAN_STYLES.map((p) => (
+            <option key={p.key} value={p.key}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <p className="hint" style={{ marginLeft: 0, marginTop: 4 }}>
+          {PLAN_STYLES.find((p) => p.key === settings.planStyle)?.blurb}
+        </p>
+      </div>
+      <div className="setting">
+        <label htmlFor="s-earliest">Never leave before</label>
+        <input
+          id="s-earliest"
+          type="time"
+          value={minutesToClock(settings.earliestDepartureMinutes)}
+          onChange={(e) => {
+            const [h, m] = e.target.value.split(":").map(Number);
+            if (Number.isFinite(h) && Number.isFinite(m)) onChange({ earliestDepartureMinutes: h * 60 + m });
+          }}
+        />
+      </div>
+      <div className="setting">
+        <label htmlFor="s-early">Idle at the office past</label>
+        <select
+          id="s-early"
+          value={settings.maxEarlyArrivalMinutes}
+          onChange={(e) => onChange({ maxEarlyArrivalMinutes: Number(e.target.value) })}
+        >
+          {[0, 5, 12, 25, 45].map((m) => (
+            <option key={m} value={m}>
+              {m === 0 ? "0 min (I count it all)" : `${m} min free`}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="setting">
+        <label htmlFor="s-risk">Lateness I accept</label>
+        <select
+          id="s-risk"
+          value={settings.lateRiskBudget}
+          onChange={(e) => onChange({ lateRiskBudget: Number(e.target.value) })}
+        >
+          {[0.02, 0.05, 0.1, 0.2].map((r) => (
+            <option key={r} value={r}>
+              ~1 day in {Math.max(2, Math.round(1 / r))}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="setting">
+        <label htmlFor="s-walk">Max walk to transit</label>
+        <input
+          id="s-walk"
+          type="number"
+          min={4}
+          max={25}
+          value={settings.transitMaxWalkMinutes}
+          onChange={(e) => onChange({ transitMaxWalkMinutes: clampNum(e.target.value, 4, 25, 12) })}
+        />
+      </div>
       <div className="setting">
         <label htmlFor="s-work">Work start</label>
         <input

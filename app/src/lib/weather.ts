@@ -59,6 +59,8 @@ function num(v: unknown, fallback: number): number {
 }
 
 /** Hourly precipitation for the departure sweep, so weather varies by slot. */
+export type WeatherHours = Awaited<ReturnType<typeof fetchWeatherHours>>;
+
 export async function fetchWeatherHours(
   lat: number,
   lon: number,

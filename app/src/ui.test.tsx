@@ -59,14 +59,24 @@ function osrmPayload(profile: string) {
   };
 }
 
+function localDay(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function weatherPayload(rainy: boolean) {
+  // Hour keys must match the runner's local date, otherwise weatherAt() falls
+  // through to hour 0 and the test asserts nothing about the hourly path.
   const hourly = Array.from({ length: 48 }, (_, i) => {
+    const day = localDay(Math.floor(i / 24));
     const hour = i % 24;
     return {
-      time: `2026-09-${hour < 10 ? "12" : "12"}T${String(hour).padStart(2, "0")}:00`,
-      precipitation: rainy && hour >= 7 && hour <= 10 ? 2.4 : 0,
+      time: `${day}T${String(hour).padStart(2, "0")}:00`,
+      precipitation: rainy ? 2.4 : 0,
       wind_speed_10m: rainy ? 34 : 8,
-      weather_code: rainy && hour >= 7 && hour <= 10 ? 63 : 1,
+      weather_code: rainy ? 63 : 1,
     };
   });
   return {
@@ -113,6 +123,12 @@ describe("Radius UI", () => {
 
     // Six weighted factors, a map, a curve, and an honest explanation.
     await waitFor(() => expect(screen.getAllByText(/\/100/).length).toBeGreaterThanOrEqual(6));
+    // The mode switch is always available, even with no network at all.
+    expect(screen.getByRole("radio", { name: /Car/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Metro \/ bus/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Never leave before/i)).toBeInTheDocument();
+    // Overpass being unreachable must read as "no corridor found", not as a crash.
+    expect(screen.getAllByText(/transit corridor|no usable transit|no corridor found/i).length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText(/Route map with congestion colouring/i).length).toBe(1);
     expect(screen.getAllByText(/built-in estimator|offline estimate|Router unreachable/i).length).toBeGreaterThan(0);
     expect(fetch).toHaveBeenCalled();
@@ -136,9 +152,32 @@ describe("Radius UI", () => {
     await waitFor(() => expect(screen.getAllByText(/OSRM \(live\)/i).length).toBeGreaterThan(0), { timeout: 8000 });
     await waitFor(() => expect(screen.getAllByText(/Open-Meteo \(live\)/i).length).toBeGreaterThan(0));
     // Rain must show up as weather friction, not as a crash.
-    expect(screen.getAllByText(/63|Rain/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Rain/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Departure curve/i).length).toBe(1);
     expect(screen.getAllByText(/leave /i).length).toBeGreaterThanOrEqual(1);
+  }, 20000);
+
+  it("does not tell an 11:00 starter to leave at dawn", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError("offline");
+    }) as unknown as typeof fetch;
+    window.localStorage.setItem(
+      "radius.settings.v1",
+      JSON.stringify({ workStartMinutes: 11 * 60, earliestDepartureMinutes: 7 * 60, commuteMode: "drive" }),
+    );
+    const { default: AppWithSettings } = await import("./App");
+    const view = render(<AppWithSettings />);
+    await waitFor(
+      () => expect(view.container.textContent).toMatch(/Leave at|Leave now|not compatible|best minute/i),
+      { timeout: 8000 },
+    );
+    // The recommendation, if there is one, is inside the traveller\u2019s window.
+    const deadline = view.container.querySelector(".nudge-sub strong");
+    if (deadline) {
+      const [h] = (deadline.textContent ?? "").split(":").map(Number);
+      expect(h).toBeGreaterThanOrEqual(7);
+    }
+    cleanup();
   }, 20000);
 
   it("scores a fallback route deterministically across refreshes", () => {

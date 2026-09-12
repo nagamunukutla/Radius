@@ -24,6 +24,8 @@ export interface CdiInputs {
   daysPerWeek: number;
   /** Live-traffic confidence 0..1; scales how much the delay factor counts. */
   trafficConfidence?: number;
+  /** Transit: share of the ride spent standing or crushed (0..1). */
+  crowdingFraction?: number;
 }
 
 export const FACTOR_WEIGHTS = {
@@ -118,7 +120,20 @@ export function computeCdi(i: CdiInputs): CdiResult {
     [6, 84],
     [9, 100],
   ]);
-  const frictionScore = Math.round(clamp(slowScore * 0.68 + stopScore * 0.32, 0, 100));
+  const driveFriction = slowScore * 0.68 + stopScore * 0.32;
+  // For a car the misery is braking; on a platform and in a packed carriage it
+  // is standing. Both belong in the same factor so the two modes stay
+  // comparable, which is the entire point of a single index.
+  const crowding = i.crowdingFraction === undefined ? null : normalize(i.crowdingFraction * 100, [
+    [10, 0],
+    [30, 26],
+    [55, 56],
+    [75, 80],
+    [95, 100],
+  ]);
+  const frictionScore = Math.round(
+    clamp(crowding === null ? driveFriction : driveFriction * 0.7 + crowding * 0.3, 0, 100),
+  );
 
   const weatherScore = Math.round(clamp(i.weatherPoints, 0, 100));
 
@@ -164,7 +179,10 @@ export function computeCdi(i: CdiInputs): CdiResult {
       label: "Stop-and-go friction",
       score: frictionScore,
       weight: FACTOR_WEIGHTS.friction,
-      detail: `${round(i.slowFraction * 100, 0)}% of the distance under 25 km/h, ${round(i.stopEventsPer10km, 1)} hard slowdowns per 10 km.`,
+      detail:
+        i.crowdingFraction === undefined
+          ? `${round(i.slowFraction * 100, 0)}% of the distance under 25 km/h, ${round(i.stopEventsPer10km, 1)} hard slowdowns per 10 km.`
+          : `${round((i.crowdingFraction ?? 0) * 100, 0)}% of the ride standing or packed, ${round(i.slowFraction * 100, 0)}% of it crawling, ${round(i.stopEventsPer10km, 1)} hard slowdowns per 10 km.`,
     },
     {
       key: "weather",

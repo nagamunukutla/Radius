@@ -1,7 +1,8 @@
 # Radius — Commute Drag Index methodology
 
-Everything the UI displays is derived from the four steps below. No step is hidden in a component: they live in
-`app/src/lib/congestion.ts` (steps 1–2), `app/src/lib/cdi.ts` (steps 3–4) and `app/src/lib/evaluate.ts`
+Everything the UI displays is derived from the six steps below. No step is hidden in a component: they live in
+`app/src/lib/congestion.ts` (steps 1–2), `app/src/lib/cdi.ts` (steps 3–4), `app/src/lib/departure.ts` (step 5),
+`app/src/lib/transit.ts` (step 6) and `app/src/lib/evaluate.ts`
 (orchestration), and each is covered by `app/src/lib/cdi.test.ts`.
 
 ---
@@ -111,26 +112,79 @@ show the caveat. A test asserts that lower confidence yields a strictly lower sc
 | 60–79 | Heavy Drag | a second shift — move the departure minute |
 | 80–100 | Gridlock Mode | rethink route, hours or office days |
 
-## Step 5 — The departure sweep and the recommendation
+## Step 5 — The departure sweep
 
-`evaluate.ts` sweeps candidate departures every **6 minutes** across a ±3.5 h window around
-`workStart − 25 min` (clamped to 05:00–23:00, and only slots in the future). For each slot it recomputes: the
-demand factor *at that clock time*, the weather *for that hour* from the hourly forecast, the resulting travel
-time, the p95 buffer, a slow-share scaled by the factor, and therefore the slot's own CDI.
-
-The recommended slot minimises
+`evaluate.ts` builds a `TripShape` for the mode you chose — ride minutes, access minutes, how much of the ride
+traffic can touch (`congestionSensitivity`), how much of it the weather can touch (`weatherExposure`), the service
+headway, and the free-flow reference — then `departure.ts` sweeps candidate departures across a window **derived
+from that trip**, not from the clock:
 
 ```
-score(slot) = travelMinutes + bufferMinutes + 0.06 × CDI(slot)
+latestDeparture = workStart − 1.25 × (freeflow + access) − 6 min
+window  = [ max(earliestFloor, latestDeparture − 115) , latestDeparture + 70 ]
+          clamped to 05:00–23:55, step 6–15 min so the curve never exceeds ~45 points
 ```
 
-among slots that still land **at or before the work start**; if none do, it picks the best future slot. The 0.06
-tie-breaker is the only place the index feeds back into the decision — it stops the planner recommending a
-technically-faster minute that is miserable to drive.
+"now" is folded into the left edge only when it is inside the decision zone
+(`now ≥ latestDeparture − 175`); otherwise an 11:00 start gets plotted from 08:35 onward rather than from dawn,
+which is precisely how the first version came to recommend leaving at 07:05 for an 11:00 start.
 
-`productivityOf()` then converts: `wasted = (predicted − freeflow) + buffer` per direction, `× 2 × daysPerWeek`,
-annualised over 46 working weeks, priced at the user's own hourly rate. `reclaimableWeeklyHours` is the gap
-between leaving now and leaving at the recommended minute — the number the recommendation has to earn.
+For each slot: the demand factor **at that clock**, the weather **for that hour**, the mode-aware minute model
+below, the lognormal buffer, the lateness risk, that slot's own CDI, and a cost.
+
+```
+ride  = rideMinutes × (1 + peakExcess × congestionSensitivity) × weatherMult
+access = accessMinutes × (1 + 0.22 × weatherPoints × exposure)
+wait  = headway/2 × (1 + 0.28 × peakExcess) + transfers × (headway/2 + 3.5)
+buffer = max(lognormal p95 − median, 0.6 × headway + weather, 1 min)
+```
+
+The headway floor on the buffer is the point: for frequent transit the dominant risk is *missing the vehicle*,
+which costs a whole headway, and a traffic-variance model alone would never predict it.
+
+### The objective
+
+```
+cost = travel + 0.5·buffer + 0.55·wait + 0.85·max(0, early − tolerance) + 2.2·late
+     + 9·max(0, risk − budget) + 0.06·CDI(slot)
+```
+
+Weights per philosophy (`balanced`, `latest`, `lowestDrag`, `protectMorning`) change only the *early* and *risk*
+terms, so "I don't mind an empty office at 07:00" and "do not wake me" are preference statements, not different
+physics. `lateRisk(travel, buffer, slack)` is the lognormal tail probability
+`1 − Φ((ln slack − ln travel)/σ)` with `σ = ln(1 + buffer/travel)/1.645`.
+
+Two rules make the answer trustworthy rather than merely optimal:
+
+1. **Risk gate.** Slots above the lateness budget are ineligible whenever any compliant slot exists, so the
+   recommendation can never arrive after the `leave no later than` deadline it publishes. If none is compliant, the
+   best is shown *with* a note that the corridor and the start time are incompatible.
+2. **Floor, with a release valve.** Nothing is recommended before `earliestDepartureMinutes`; but if that would
+   leave zero candidates, the earlier slots are shown and the note says how many were excluded. The planner failing
+   to answer is a worse outcome than the planner answering inconveniently.
+
+## Step 6 — Public transport
+
+No key-free, worldwide, CORS-enabled **timetable** API exists, so Radius does not pretend to have one. It measures
+what is measurable and models the rest, explicitly:
+
+| Quantity | Source |
+| --- | --- |
+| Which stops exist near both ends | Overpass query on OpenStreetMap: `railway=station/halt/tram_stop/subway_entrance`, `station=subway/lightRail/monorail`, `highway=bus_stop` (nodes *and* ways, `out center`) |
+| Which mode, and the walk to it | nearest candidate per kind, platforms of one station collapsed by name, metro ≻ rail ≻ tram ≻ bus at equal distance |
+| Access and egress walk | crow-flight × 1.32 street factor at 4.7 km/h (78 m/min) |
+| In-vehicle time | real station-to-station distance × per-mode detour ÷ per-mode link speed, plus dwell per stop |
+| Waiting | half the mode headway × `1 + 0.28 × peak`, scaled by `citySeverity` |
+| Transfers | 0 for rail or trips under 4 km, else 1 (+half a headway +3.5 min to change platforms) |
+| Reject | any mode whose walk exceeds your limit, or whose stops are closer together than the trip |
+
+Per-mode constants (speed incl. stops, peak headway, stop spacing, detour, outdoor share): metro 36 km/h / 4 min /
+1.25 km / 1.16 / 0.10 · commuter rail 47 / 12 / 3.6 / 1.28 / 0.30 · tram 22 / 8 / 0.62 / 1.30 / 0.55 · bus
+16 / 10 / 0.7 / 1.44 / 0.85.
+
+Because the walk and the station geometry are measured, "the metro is faster than the bus *and* kinder in rain"
+is a conclusion rather than an assumption. Because headways are modelled, the absolute minutes should be read as
+±10 % — and the card says exactly that, in the app, next to the itinerary.
 
 ## Known limitations (stated, not hidden)
 
@@ -138,9 +192,11 @@ between leaving now and leaving at the recommended minute — the number the rec
    optional TomTom key closes this gap; without it, delay is a calibrated model.
 2. **City-scale peaks, not corridor-scale.** One demand curve applies to the whole route, so a route that is
    90 % motorway and 10 % school-zone will under-represent the second part. Per-edge speeds partially compensate.
-3. **Transit is a heuristic** (`drive × 1.45 + 11 min` when the trip exceeds 4 km) — not a timetable. It is used
-   only for the "is there a pressure valve?" factor, never as a recommendation.
-4. **Local time uses the browser's clock.** Cross-timezone planning (remote workers, travel days) is not modelled.
+3. **Transit minutes are modelled, not scheduled.** Stops, walking distances and station-to-station geometry come
+   from OpenStreetMap; headways, link speeds and the transfer penalty do not, because Radius has no timetable. It
+   will happily price a 4-minute metro that stopped running at 22:00. Feeding it GTFS is the obvious next step.
+4. **No "no service" guard.** Late or split shifts are scored with the same headway as peak service.
+5. **Local time uses the browser's clock.** Cross-timezone planning (remote workers, travel days) is not modelled.
 
 Contributions that replace any heuristic with a measured feed are welcome — the seams are all behind
 `fetchRoutes` / `fetchWeather` / `fetchTomTomFlowRatio`.

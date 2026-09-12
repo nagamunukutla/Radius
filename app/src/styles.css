@@ -233,3 +233,40 @@ footer.foot a { color: var(--muted); text-underline-offset: 2px; }
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
   clip-path: inset(50%); white-space: nowrap;
 }
+
+/* ---------- mode picker ---------- */
+.modebar { display: flex; gap: 8px; flex-wrap: wrap; }
+.mode {
+  flex: 1 1 120px; display: grid; grid-template-columns: auto 1fr; gap: 0 8px;
+  align-items: center; text-align: left; cursor: pointer;
+  background: rgba(0,0,0,0.24); border: 1px solid var(--line); border-radius: 12px; padding: 9px 11px;
+  transition: 0.16s ease;
+}
+.mode:hover { border-color: rgba(56,225,192,0.45); }
+.mode.on { background: linear-gradient(120deg, rgba(56,225,192,0.18), rgba(56,225,192,0.05)); border-color: rgba(56,225,192,0.55); }
+.mode.off { opacity: 0.55; }
+.mode .glyph { grid-row: span 2; font-size: 18px; line-height: 1; }
+.mode .mode-name { font-size: 13.5px; font-weight: 600; }
+.mode .mode-time { grid-column: 2; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---------- nudge ---------- */
+.nudge-main { font-size: 14.5px; }
+.nudge-sub { margin-top: 9px; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: #b9c6dd; }
+.nudge-sub span { display: flex; gap: 6px; }
+.nudge-sub span::before { content: "·"; color: var(--accent); }
+.nudge-sub strong { color: var(--text); }
+
+/* ---------- transit legs ---------- */
+ol.legs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.leg { display: flex; gap: 10px; align-items: center; }
+.leg-glyph { width: 22px; text-align: center; font-size: 14px; flex: none; }
+.leg-body { flex: 1; min-width: 0; }
+.leg-top { display: flex; gap: 10px; font-size: 13px; }
+.leg-top b { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; }
+.leg-bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,0.07); margin-top: 5px; overflow: hidden; }
+.leg-bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent); opacity: 0.85; }
+.leg-walk .leg-bar i { background: #9ad86b; }
+.leg-wait .leg-bar i { background: #ffcf5c; }
+.leg-ride .leg-bar i { background: #38e1c0; }
+.transit-empty { display: flex; flex-direction: column; gap: 10px; }
+table.slots .sub { display: block; color: var(--muted); font-size: 11px; }
